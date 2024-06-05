@@ -8,6 +8,7 @@
 #include <esp_timer.h>
 #include <esp_task_wdt.h>
 #include <esp32-hal.h>
+#include "esp_check.h"
 
 #include "logging.hpp"
 
@@ -59,6 +60,9 @@ namespace esp32m
         {
             _lock = xSemaphoreCreateMutex();
             _handle = xRingbufferCreate(bufsize, RINGBUF_TYPE_NOSPLIT);
+            // if (_handle == NULL) {
+            //     printf("Failed to create ring buffer\n");
+            // }
             _item_to_be_sent = nullptr;
         }
         ~BufferedAppender()
@@ -181,7 +185,9 @@ namespace esp32m
         {
             _lock = xSemaphoreCreateMutex();
             _buf = xRingbufferCreate(bufsize, RINGBUF_TYPE_NOSPLIT);
+#ifdef LOGGING_USE_BACKGROUND_TASK
             xTaskCreate([](void *self) { ((LogQueue *)self)->run(); }, "esp32m::log-queue", 4096, this, tskIDLE_PRIORITY, &_task);
+#endif
             logQueue = this;
         }
         ~LogQueue()
@@ -208,6 +214,48 @@ namespace esp32m
         RingbufHandle_t _buf;
         TaskHandle_t _task = nullptr;
         friend class Logging;
+
+        bool internalRun(TickType_t ticks_timeout)
+        {
+            // printf("doRun = %s::%s\n", __FILE__, __FUNCTION__);
+            bool done = false;
+            size_t size;
+            LogMessage *item = (LogMessage *)xRingbufferReceive(_buf, &size, ticks_timeout);
+            if (item)
+            {
+                LogAppender *appender = _appenders;
+                while (appender)
+                {
+                    appender->append(item);
+                    appender = appender->_next;
+                }
+                vRingbufferReturnItem(_buf, item);
+            }
+            else if(_flush_period_ms) {
+                LogAppender *appender = _appenders;
+                while (appender)
+                {
+                    //TODO : Loop only on "Buffered" Appenders ?
+                    appender->append(nullptr); // nullptr ! Just to "flush" BufferedAppenders
+                    appender = appender->_next;
+                }
+            }
+            else { done = true; }
+            return done;
+        }
+
+        void doRun(uint32_t timeout_ms)
+        {
+            bool done = false;
+            uint32_t startMillis = millis();
+            _flush_period_ms = 0; // Reset flush period if using manual flushing ;-)
+            do
+            {
+                done = internalRun(1);
+            } while ((millis() - startMillis < timeout_ms) && (done == false));
+            // printf("doRun = %s::%s time=%i startms=%i timeout=%i done=%i\n", __FILE__, __FUNCTION__, millis(), startMillis, timeout_ms, (int)done);
+        }
+
         void run()
         {
             const TickType_t ticks_timeout = _flush_period_ms ? (TickType_t)(_flush_period_ms/portTICK_PERIOD_MS) : 100;
@@ -215,28 +263,7 @@ namespace esp32m
             for (;;)
             {
                 esp_task_wdt_reset();
-                size_t size;
-                LogMessage *item = (LogMessage *)xRingbufferReceive(_buf, &size, ticks_timeout);
-                if (item)
-                {
-                    LogAppender *appender = _appenders;
-                    while (appender)
-                    {
-                        appender->append(item);
-                        appender = appender->_next;
-                    }
-                    vRingbufferReturnItem(_buf, item);
-                }
-                else if(_flush_period_ms) {
-                    LogAppender *appender = _appenders;
-                    while (appender)
-                    {
-                        //TODO : Loop only on "Buffered" Appenders ?
-                        appender->append(nullptr); // nullptr ! Just to "flush" BufferedAppenders
-                        appender = appender->_next;
-                    }
-                }
-                else {}
+                doRun(ticks_timeout);
                 yield();
             }
         }
@@ -320,17 +347,28 @@ namespace esp32m
 
     void Logger::log(LogLevel level, const char *msg)
     {
-        if (isEmpty(msg))
+        if (isEmpty(msg)){
+            // printf("Drop log empty\n");
             return;
+        }
+        // if(_level==0) {
+        //     printf("Logger Null _level=%i\n", (int)_level);
+        // }
         auto effectiveLevel = _level;
-        if (effectiveLevel == LogLevel::Default)
+        if (effectiveLevel == LogLevel::Default) {
+            // printf("Update EffectiveLevel (%i)\n", (int)effectiveLevel);
             effectiveLevel = Logging::level();
-        if (level > effectiveLevel)
+        }
+        if (level > effectiveLevel) {   
+            // printf("Logger Drop log level (%i/%i)\n", (int)level, (int)effectiveLevel);
             return;
+        }
         auto name = _loggable.logName();
         LogMessage *message = LogMessage::alloc(level, timeOrUptime(), name, msg);
-        if (!message)
+        if (!message){
+            // printf("Logger:: No message!!!");
             return;
+        }
         if (!_appenders)
         {
             auto m = Logging::formatter()(message);
@@ -451,6 +489,15 @@ namespace esp32m
         }
         else if (q)
             delete q;
+    }
+
+    void Logging::doQueue(uint32_t timeout_ms)
+    {
+        auto q = logQueue;
+        if (q)
+        {
+            q->doRun(timeout_ms);
+        }
     }
 
     Logger &Logging::system()

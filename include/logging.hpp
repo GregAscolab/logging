@@ -138,7 +138,10 @@ namespace esp32m
      * Log messages with level greater than this one will be dropped
      * @param level New log level
      */
-    void setLevel(LogLevel level) { _level = level; }
+    void setLevel(LogLevel level) {
+      // printf("Logger setLevel %i>>>%i\n", (int)level, (int)_level);
+      _level = level;
+    }
     /**
      * @brief Send message to the log
      * @param level If greater than this logger's level, the message will be dropped
@@ -283,7 +286,10 @@ namespace esp32m
     /**
      * @brief Set global log level
      */
-    static void setLevel(LogLevel level) { _level = level; }
+    static void setLevel(LogLevel level) {
+      printf("Logging Internal setLevel %i >>> %i\n", (int)_level, (int)level);
+      _level = level;
+    }
 
     /**
      * @brief Defines how the messages are being forwarded to appenders.
@@ -299,6 +305,8 @@ namespace esp32m
      *                        @warning  Be careful, with standard @c Logging::BufferedAppender() it could result in loosing item, if appender is not ready, the item will be lost...
      */
     static void useQueue(int size = 1024, uint32_t autoFlushPeriod = 0);
+
+    static void doQueue(uint32_t timeout_ms);
 
     /**
      * @brief Hooks ESP32-specific logging mechanism, see @c esp_log_set_vprintf() in the esp-idf docs for details
